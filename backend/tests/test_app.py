@@ -97,6 +97,55 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 400)
 
+    def test_support_below_floor_is_400(self):
+        # 0.5% (0.005) is below the 1% (0.01) floor
+        res = self.client.post(
+            "/api/mine",
+            data=json.dumps({"min_support": 0.005, "min_confidence": 0.5}),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("cannot be lower than 0.01", res.get_json()["error"])
+
+        # Also test percent format below 1% (e.g. "0.5%")
+        res_pct = self.client.get("/api/mine?min_support=0.5%&min_confidence=50")
+        self.assertEqual(res_pct.status_code, 400)
+        self.assertIn("cannot be lower than 0.01", res_pct.get_json()["error"])
+
+    def test_rules_returned_metric_present(self):
+        res = self.client.post(
+            "/api/mine",
+            data=json.dumps({"min_support": 0.5, "min_confidence": 0.5}),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        metrics = body["metrics"]
+        self.assertIn("rule_count", metrics)
+        self.assertIn("rules_returned", metrics)
+        self.assertEqual(metrics["rules_returned"], len(body["association_rules"]))
+        self.assertLessEqual(metrics["rules_returned"], 500)
+
+    def test_mine_accepts_max_k_none(self):
+        # Test max_k as null/none in JSON
+        res = self.client.post(
+            "/api/mine",
+            data=json.dumps({"min_support": 0.5, "min_confidence": 0.5, "max_k": None}),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.get_json()["metrics"]["max_k"])
+
+        # Test max_k as "none" via query param
+        res_get = self.client.get("/api/mine?min_support=50&min_confidence=50&max_k=none")
+        self.assertEqual(res_get.status_code, 200)
+        self.assertIsNone(res_get.get_json()["metrics"]["max_k"])
+
+    def test_mine_defaults_max_k_to_4(self):
+        res = self.client.get("/api/mine?min_support=50&min_confidence=50")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["metrics"]["max_k"], 4)
+
     def test_invalid_json_is_400(self):
         res = self.client.post(
             "/api/mine",

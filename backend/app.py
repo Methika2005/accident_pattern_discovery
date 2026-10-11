@@ -14,7 +14,7 @@ Thresholds come from React as fractions (0.05) or percents (5).
 """
 
 from __future__ import annotations
-
+import math
 import os
 from typing import Any
 
@@ -41,14 +41,23 @@ def _error_payload(message: str, status_code: int):
     return jsonify({"error": message, "status": status_code}), status_code
 
 
-def _parse_threshold(value: Any, name: str) -> float:
+MIN_SUPPORT_FLOOR = 0.01
+DEFAULT_MAX_K = 4
+MAX_RULES_RETURNED = 500
+
+
+def _parse_threshold(value: Any, name: str, min_floor: float = 0.0) -> float:
     """Accept 0.05 or '5' / '5%' and return a fraction in (0, 1]."""
     if value is None or value == "":
         raise ApiError(f"{name} is required.")
     if isinstance(value, bool):
         raise ApiError(f"{name} must be a number.")
+    is_percent_str = False
     if isinstance(value, str):
-        text = value.strip().rstrip("%").strip()
+        raw_text = value.strip()
+        if raw_text.endswith("%"):
+            is_percent_str = True
+        text = raw_text.rstrip("%").strip()
         try:
             value = float(text)
         except ValueError as exc:
@@ -56,12 +65,22 @@ def _parse_threshold(value: Any, name: str) -> float:
     if not isinstance(value, (int, float)):
         raise ApiError(f"{name} must be a number.")
     value = float(value)
-    if value > 1:
+    if not math.isfinite(value):
+         raise ApiError(f"{name} must be a finite number.")
+    if is_percent_str:
+        if value <= 0 or value > 100:
+            raise ApiError(f"{name} must be between 0 and 100%.")
+        value = value / 100.0
+    elif value > 1:
         if value > 100:
             raise ApiError(f"{name} must be between 0 and 1, or a percentage 0-100.")
         value = value / 100.0
     if value <= 0 or value > 1:
         raise ApiError(f"{name} must be > 0 and <= 1 (or 1-100 as a percent).")
+    if value < min_floor:
+        raise ApiError(
+            f"{name} cannot be lower than {min_floor} ({min_floor * 100:.0f}%)."
+        )
     return value
 
 
@@ -81,15 +100,32 @@ def _parse_exclude(value: Any) -> list[str]:
     raise ApiError("exclude must be a list of attribute names.")
 
 
-def _parse_max_k(value: Any) -> int:
-    if value is None or value == "":
-        return 4
+_MISSING = object()
+
+
+def _parse_max_k(value: Any) -> int | None:
+    """
+    Parse max_k parameter.
+    If omitted or empty string, defaults to DEFAULT_MAX_K (4).
+    If explicitly None, null, 'none', 'all', 'unlimited', returns None (no limit).
+    If positive integer, returns that integer.
+    """
+    if value is _MISSING:
+        return DEFAULT_MAX_K
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped == "":
+            return DEFAULT_MAX_K
+        if stripped in ("none", "null", "all", "unlimited"):
+            return None
     try:
         max_k = int(value)
     except (TypeError, ValueError) as exc:
-        raise ApiError("max_k must be a positive integer.") from exc
+        raise ApiError("max_k must be a positive integer or null.") from exc
     if max_k < 1:
-        raise ApiError("max_k must be a positive integer.")
+        raise ApiError("max_k must be a positive integer or null.")
     return max_k
 
 
@@ -120,7 +156,7 @@ def _mining_args():
         min_support = payload.get("min_support", payload.get("support"))
         min_confidence = payload.get("min_confidence", payload.get("confidence"))
         exclude = payload.get("exclude")
-        max_k = payload.get("max_k")
+        max_k = payload.get("max_k", _MISSING)
     else:
         payload = request.get_json(silent=True)
         if payload is None:
@@ -132,10 +168,12 @@ def _mining_args():
         min_support = payload.get("min_support", payload.get("support"))
         min_confidence = payload.get("min_confidence", payload.get("confidence"))
         exclude = payload.get("exclude")
-        max_k = payload.get("max_k")
+        max_k = payload.get("max_k", _MISSING)
 
     return {
-        "min_support": _parse_threshold(min_support, "min_support"),
+        "min_support": _parse_threshold(
+            min_support, "min_support", min_floor=MIN_SUPPORT_FLOOR
+        ),
         "min_confidence": _parse_threshold(min_confidence, "min_confidence"),
         "exclude": _parse_exclude(exclude),
         "max_k": _parse_max_k(max_k),
@@ -235,6 +273,13 @@ def create_app(dataset_path: str | None = None) -> Flask:
             min_confidence=args["min_confidence"],
             max_k=args["max_k"],
         )
+        total_rules = len(result["association_rules"])
+        result["association_rules"] = result["association_rules"][:MAX_RULES_RETURNED]
+        result["metrics"]["rule_count"] = total_rules
+        result["metrics"]["rules_returned"] = len(result["association_rules"])
+        result["metrics"]["rules_capped"] = total_rules > len(result["association_rules"])
+        result["metrics"]["max_rules_returned"] = MAX_RULES_RETURNED
+
         result["dataset"] = {
             "source_file": stats.get("source_file"),
             "transaction_count": stats.get("transaction_count"),
