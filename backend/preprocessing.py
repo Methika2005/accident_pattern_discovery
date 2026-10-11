@@ -51,7 +51,6 @@ import pandas as pd
 #: Columns that must exist in the CSV, otherwise we refuse to run.
 REQUIRED_COLUMNS = [
     "road_type", "weather", "traffic_density", "cause", "accident_severity",
-    "is_peak_hour",
 ]
 
 #: Column that every retained record must have (rules are about severity).
@@ -68,7 +67,6 @@ ITEM_COLUMNS = [
     "temperature",
     "traffic_density",
     "time_of_day",
-    "is_peak_hour",
     "day_of_week",
     "season",
     "festival",
@@ -88,6 +86,7 @@ EXCLUDED_COLUMNS = {
     "state": "fully determined by 'city' in this dataset - duplicates information",
     "is_weekend": "fully determined by 'day_of_week' - duplicates information",
     "visibility": "fully determined by 'weather' in this dataset - gives trivial rules",
+    "is_peak_hour": "fully determined by 'hour' (1 for hours 8-10 and 17-19) - gives trivial rules with 'time_of_day'",
     "casualties": "outcome of the accident (leakage) - correlates with severity",
     "risk_score": "derived score that already encodes severity (leakage)",
 }
@@ -188,7 +187,7 @@ def _build_item_frame(raw: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame
         elif name == "temperature":
             if "temperature" in raw:
                 cols[name] = _bin_temperature(_to_number(raw["temperature"]))
-        elif name in ("traffic_signal", "is_peak_hour"):
+        elif name == "traffic_signal":
             if name in raw:
                 cols[name] = _yes_no(raw[name])
         elif name in ("lanes", "vehicles_involved"):

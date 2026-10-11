@@ -42,11 +42,11 @@ reporting it honestly is a valid result.
 | accident_severity | Yes | minor / major / fatal |
 | vehicles_involved | Yes | `vehicles_involved=1` ... `5` |
 | casualties | No | Outcome of the accident (leakage) |
-| is_peak_hour | Yes | yes / no |
+| is_peak_hour | No | Fully determined by `hour` (1 for hours 8-10 and 17-19); it gives trivial rules with `time_of_day` |
 | festival | Yes | holi / eid / diwali / new_year; **"None" (99.4% of rows) produces no item** |
 | risk_score | No | Derived score that already encodes severity (leakage) |
 
-15 attributes are mined, giving 62 distinct items and about 14 items per transaction.
+14 attributes are mined, giving 60 distinct items and about 13 items per transaction.
 
 ## Cleaning rules
 - Everything is read as text, so the literal string `None` in `festival` is not turned into NaN.

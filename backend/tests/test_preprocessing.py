@@ -64,8 +64,6 @@ class TestTransactionConversion(CsvTestCase):
         self.assertIn("season=summer", tx[1])           # May
         self.assertIn("temperature=hot", tx[0])         # 32
         self.assertIn("temperature=cool", tx[1])        # 20
-        self.assertIn("is_peak_hour=no", tx[0])
-        self.assertIn("is_peak_hour=yes", tx[1])
         self.assertIn("traffic_signal=yes", tx[0])
         self.assertIn("lanes=3", tx[0])
 
@@ -80,7 +78,7 @@ class TestExclusions(CsvTestCase):
     def test_ids_coordinates_and_leakage_never_become_items(self):
         tx, stats = load_and_preprocess(self.write_csv(ROW_A, ROW_B))
         banned = ("accident_id=", "latitude=", "longitude=", "date=", "time=",
-                  "hour=", "state=", "is_weekend=", "visibility=",
+                  "hour=", "state=", "is_weekend=", "visibility=", "is_peak_hour=",
                   "casualties=", "risk_score=")
         for t in tx:
             for item in t:
