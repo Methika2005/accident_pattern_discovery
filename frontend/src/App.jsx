@@ -45,6 +45,14 @@ const chartConfig = {
   modeBarButtonsToRemove: ["lasso2d", "select2d"],
 };
 
+const conditionAttributeLabels = [
+  { key: "weather", label: "Weather" },
+  { key: "traffic_density", label: "Traffic density" },
+  { key: "road_type", label: "Road type" },
+  { key: "traffic_signal", label: "Traffic signal status" },
+  { key: "time_of_day", label: "Time of day" },
+];
+
 function formatNumber(value) {
   if (value === null || value === undefined || value === "") return "—";
 
@@ -107,40 +115,108 @@ function getFrequencyEntries(stats) {
 
   if (Array.isArray(frequencies)) {
     return frequencies
-      .map((item) => ({
-        label: String(
-          item.item ?? item.name ?? item.label ?? item.attribute_value ?? ""
-        ),
-        count: Number(
-          item.count ??
-            item.frequency ??
-            item.support_count ??
-            item.support ??
-            0
-        ),
-        support: item.support,
-      }))
-      .filter((item) => item.label && Number.isFinite(item.count));
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+
+        const rawCount =
+          item.count ?? item.frequency ?? item.support_count;
+        return {
+          label: String(
+            item.item ?? item.name ?? item.label ?? item.attribute_value ?? ""
+          ),
+          count:
+            typeof rawCount === "number" ? rawCount : NaN,
+          support: item.support,
+        };
+      })
+      .filter(
+        (item) =>
+          item !== null &&
+          item.label &&
+          Number.isFinite(item.count) &&
+          Number.isInteger(item.count) &&
+          item.count >= 0
+      );
   }
 
   if (typeof frequencies === "object") {
     return Object.entries(frequencies)
-      .map(([label, value]) => ({
-        label,
-        count: Number(
+      .map(([label, value]) => {
+        const rawCount =
           typeof value === "object" && value !== null
-            ? value.count ?? value.frequency ?? value.support_count ?? 0
-            : value
-        ),
-        support:
-          typeof value === "object" && value !== null
-            ? value.support
-            : null,
-      }))
-      .filter((item) => Number.isFinite(item.count));
+            ? value.count ?? value.frequency ?? value.support_count
+            : value;
+        return {
+          label,
+          count:
+            typeof rawCount === "number" ? rawCount : NaN,
+          support:
+            typeof value === "object" && value !== null
+              ? value.support
+              : null,
+        };
+      })
+      .filter(
+        (item) =>
+          Number.isFinite(item.count) &&
+          Number.isInteger(item.count) &&
+          item.count >= 0
+      );
   }
 
   return [];
+}
+
+function getConditionAttributes(stats) {
+  const totalRecords = Number(stats?.transaction_count);
+  const frequencies = getFrequencyEntries(stats).filter(
+    (item) =>
+      Number.isFinite(totalRecords) &&
+      Number.isInteger(totalRecords) &&
+      totalRecords > 0 &&
+      item.count <= totalRecords
+  );
+  const availableAttributes = conditionAttributeLabels
+    .map((attribute) => {
+      const expectedValues = stats?.attribute_values?.[attribute.key];
+      const entries = frequencies
+        .flatMap((item) => {
+          const separator = item.label.indexOf("=");
+          if (separator < 0) return [];
+
+          const key = item.label.slice(0, separator).trim().toLowerCase();
+          const value = item.label.slice(separator + 1).trim();
+          if (key !== attribute.key || !value) return [];
+
+          return [{ value, count: item.count }];
+        })
+        .sort(
+          (a, b) =>
+            b.count - a.count || a.value.localeCompare(b.value)
+        );
+      const expectedValueSet = new Set(
+        Array.isArray(expectedValues) ? expectedValues.map(String) : []
+      );
+      const actualValueSet = new Set(entries.map((item) => item.value));
+
+      return {
+        ...attribute,
+        entries,
+        complete:
+          expectedValueSet.size > 0 &&
+          expectedValueSet.size === entries.length &&
+          actualValueSet.size === entries.length &&
+          entries.every((item) => expectedValueSet.has(item.value)),
+      };
+    })
+    .filter(
+      (attribute) =>
+        attribute.entries.length > 0 ||
+        (Array.isArray(stats?.attribute_values?.[attribute.key]) &&
+          stats.attribute_values[attribute.key].length > 0)
+    );
+
+  return availableAttributes;
 }
 
 function getSeverityEntries(stats) {
@@ -453,18 +529,74 @@ function App() {
     }
   }
 
-  const frequencyEntries = useMemo(
-    () =>
-      getFrequencyEntries(stats)
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 10),
-    [stats]
-  );
-
   const severityEntries = useMemo(
     () => getSeverityEntries(stats),
     [stats]
   );
+
+  const conditionAttributes = useMemo(
+    () => getConditionAttributes(stats),
+    [stats]
+  );
+  const conditionRecordCount = getFirstValue(stats, ["transaction_count"]);
+  const totalConditionRecords = parseMetric(conditionRecordCount);
+  const conditionSummaries = useMemo(
+    () =>
+      conditionAttributeLabels
+        .filter(
+          (attribute) =>
+            (Array.isArray(stats?.attributes_used) &&
+              stats.attributes_used.includes(attribute.key)) ||
+            Object.hasOwn(stats?.attribute_values ?? {}, attribute.key)
+        )
+        .map((attribute) => {
+          const condition = conditionAttributes.find(
+            (item) => item.key === attribute.key
+          );
+          const rawMissingCount =
+            stats?.missing_values_per_attribute?.[attribute.key];
+          const missingCount =
+            typeof rawMissingCount === "number" &&
+            Number.isInteger(rawMissingCount) &&
+            rawMissingCount >= 0 &&
+            Number.isFinite(totalConditionRecords) &&
+            rawMissingCount <= totalConditionRecords
+              ? rawMissingCount
+              : null;
+
+          return {
+            ...attribute,
+            winner:
+              condition?.complete && condition.entries.length > 0
+                ? condition.entries[0]
+                : null,
+            missingCount,
+          };
+        }),
+    [conditionAttributes, stats, totalConditionRecords]
+  );
+  const commonConditionEntries = useMemo(
+    () =>
+      conditionSummaries
+        .filter((attribute) => attribute.winner)
+        .map((attribute) => ({
+          ...attribute,
+          percentage:
+            Number.isFinite(totalConditionRecords) &&
+            totalConditionRecords > 0
+              ? (attribute.winner.count / totalConditionRecords) * 100
+              : null,
+        }))
+        .sort(
+          (a, b) =>
+            b.winner.count - a.winner.count ||
+            a.label.localeCompare(b.label)
+        ),
+    [conditionSummaries, totalConditionRecords]
+  );
+  const unavailableConditionLabels = conditionSummaries
+    .filter((attribute) => !attribute.winner)
+    .map((attribute) => attribute.label);
 
   const rulePoints = useMemo(
     () =>
@@ -524,22 +656,20 @@ function App() {
     };
   }, [severityEntries, transactionCount]);
 
-  const frequencyInference = useMemo(() => {
-    if (frequencyEntries.length === 0) return null;
-
-    const [mostFrequent, ...otherFrequent] = frequencyEntries.slice(0, 3);
+  const conditionInference = useMemo(() => {
+    if (commonConditionEntries.length === 0) return null;
+    const mostFrequent = commonConditionEntries[0];
     return {
-      takeaway: `${formatItemLabel(mostFrequent.label)} was the most frequent item.`,
-      evidence: [
-        `${formatItemLabel(mostFrequent.label)} appeared in ${formatNumber(mostFrequent.count)} records.`,
-        ...otherFrequent.map(
-          (item) =>
-            `${formatItemLabel(item.label)} appeared ${formatNumber(item.count)} times`
-        ),
-      ].join(" "),
-      caveat: "Frequency in this dataset alone does not indicate cause or risk.",
+      takeaway: `${mostFrequent.label}: ${formatItemLabel(mostFrequent.winner.value)} was the most common recorded category.`,
+      evidence: commonConditionEntries
+        .map(
+          (attribute) =>
+            `${attribute.label}: ${formatItemLabel(attribute.winner.value)} (${formatNumber(attribute.winner.count)} records, ${attribute.percentage.toFixed(1)}% of analyzed records)`
+        )
+        .join(". "),
+      caveat: "This is a distribution among recorded accidents, not evidence of cause or accident probability.",
     };
-  }, [frequencyEntries]);
+  }, [commonConditionEntries]);
 
   const associationInference = useMemo(() => {
     if (rules.length === 0 || rulePoints.length === 0) return null;
@@ -551,7 +681,6 @@ function App() {
     return {
       takeaway: "This combination is worth investigating.",
       evidence: `In records containing ${strongestRule.condition}, ${strongestRule.result} appeared in ${formatPercentage(strongestRule.confidenceValue / 100)} of cases (confidence). Support was ${strongestRule.support} and lift was ${strongestRule.lift}.`,
-      caveat: "This is an association in the analyzed records, not a causal finding.",
     };
   }, [rulePoints, rules.length]);
 
@@ -1072,28 +1201,64 @@ function App() {
                 </Panel>
 
                 <Panel
-                  title="Top accident factors"
-                  subtitle="Top 10 categorical items by record count, as reported by dataset statistics."
+                  title="Most Common Accident Conditions"
+                  subtitle="The highest-count recorded category is shown independently for each available condition. Ties are resolved alphabetically."
                   icon={TrendingUp}
                 >
-                  {frequencyEntries.length > 0 ? (
+                  <p className="mb-4 text-xs leading-5 text-slate-400">
+                    Missing records by condition:{" "}
+                    {conditionSummaries.length > 0
+                      ? conditionSummaries
+                          .map(
+                            (attribute) =>
+                              `${attribute.label}: ${attribute.missingCount === null ? "Missing count unavailable" : formatNumber(attribute.missingCount)}`
+                          )
+                          .join(" · ")
+                      : "Missing counts unavailable."}
+                    {" Percentages use "}
+                    {Number.isFinite(totalConditionRecords) &&
+                    totalConditionRecords > 0
+                      ? formatNumber(totalConditionRecords)
+                      : "the total"}
+                    {" analyzed accident records as the denominator and may not add up to 100% when values are missing."}
+                  </p>
+                  {commonConditionEntries.length > 0 &&
+                  Number.isInteger(totalConditionRecords) &&
+                  totalConditionRecords > 0 ? (
                     <Plot
                       data={[
                         {
                           type: "bar",
                           orientation: "h",
-                          x: frequencyEntries
+                          x: commonConditionEntries
                             .slice()
                             .reverse()
-                            .map((item) => item.count),
-                          y: frequencyEntries
+                            .map((item) => item.winner.count),
+                          y: commonConditionEntries
                             .slice()
                             .reverse()
-                            .map((item) => formatItemLabel(item.label)),
-                          text: frequencyEntries
+                            .map(
+                              (item) =>
+                                `${item.label}: ${formatItemLabel(item.winner.value)}`
+                            ),
+                          text: commonConditionEntries
                             .slice()
                             .reverse()
-                            .map((item) => formatNumber(item.count)),
+                            .map(
+                              (item) =>
+                                `${formatNumber(item.winner.count)} (${item.percentage.toFixed(1)}%)`
+                            ),
+                          customdata: commonConditionEntries
+                            .slice()
+                            .reverse()
+                            .map((item) => [
+                              item.label,
+                              formatItemLabel(item.winner.value),
+                              item.percentage,
+                              item.missingCount === null
+                                ? "Missing count unavailable"
+                                : formatNumber(item.missingCount),
+                            ]),
                           textposition: "outside",
                           cliponaxis: false,
                           marker: {
@@ -1101,25 +1266,25 @@ function App() {
                             line: { color: "#0891b2", width: 1 },
                           },
                           hovertemplate:
-                            "<b>%{y}</b><br>Records: %{x:,}<extra></extra>",
+                            "<b>%{customdata[0]}: %{customdata[1]}</b><br>Accident records: %{x:,}<br>Of all analyzed accident records: %{customdata[2]:.1f}%<br>Missing records for condition: %{customdata[3]}<extra></extra>",
                         },
                       ]}
                       layout={{
                         ...chartLayout,
-                        height: 330,
+                        height: Math.max(330, commonConditionEntries.length * 58),
                         title: {
-                          text: "Most frequent accident factors",
+                          text: "Highest-count categories by condition",
                           font: { size: 14 },
                         },
-                        margin: { l: 150, r: 20, t: 42, b: 50 },
+                        margin: { l: 210, r: 80, t: 42, b: 50 },
                         xaxis: {
                           ...chartLayout.xaxis,
-                          title: { text: "Records (count)" },
+                          title: { text: "Accident records (count)" },
                           rangemode: "tozero",
                         },
                         yaxis: {
                           ...chartLayout.yaxis,
-                          title: { text: "Item / category value" },
+                          title: { text: "Condition and category" },
                           automargin: true,
                         },
                       }}
@@ -1131,19 +1296,30 @@ function App() {
                     <EmptyChart
                       message={
                         loadingStats
-                          ? "Loading item frequencies from dataset statistics..."
-                          : "No usable item frequencies are available in the dataset statistics."
+                          ? "Loading condition frequencies from dataset statistics..."
+                          : conditionSummaries.length > 0 &&
+                              conditionSummaries.every(
+                                (attribute) => !attribute.winner
+                              )
+                            ? "Complete category counts are unavailable for the supported conditions in the dataset statistics."
+                            : "No usable frequencies and analyzed-record total are available for these conditions."
                       }
                     />
                   )}
+                  {unavailableConditionLabels.length > 0 && (
+                    <p className="mt-3 text-xs leading-5 text-slate-500">
+                      Complete category counts unavailable for:{" "}
+                      {unavailableConditionLabels.join(", ")}.
+                    </p>
+                  )}
                   <KeyInference
-                    {...(frequencyInference || {
+                    {...(conditionInference || {
                       takeaway: loadingStats
-                        ? "Loading dataset item frequencies."
-                        : "Item frequencies are unavailable.",
+                        ? "Loading accident condition frequencies."
+                        : "Most common accident conditions are unavailable.",
                       evidence: loadingStats
-                        ? "Waiting for item counts from dataset statistics."
-                        : "The dataset statistics do not contain usable item counts.",
+                        ? "Waiting for condition counts from dataset statistics."
+                        : "Complete category counts and a valid analyzed-record total are required to compare recorded conditions.",
                     })}
                   />
                 </Panel>
@@ -1243,6 +1419,11 @@ function App() {
                             : "Run an analysis to see an inference based on returned confidence and lift metrics.",
                   })}
                 />
+                <p className="mt-3 text-xs leading-5 text-slate-500">
+                  These rules identify associations within recorded accident
+                  data. They do not establish causation or prove that a
+                  condition increases accident risk.
+                </p>
               </Panel>
             </section>
 
@@ -1261,8 +1442,8 @@ function App() {
                   Association rules
                 </h2>
                 <p className="mt-2 text-sm text-slate-400">
-                  Each rule describes items that co-occur in the dataset. It
-                  does not establish that one factor causes another.
+                  Review each returned rule’s antecedent, consequent, support,
+                  confidence, lift, and plain-language interpretation.
                 </p>
               </div>
 
@@ -1367,7 +1548,7 @@ function App() {
                               appears
                               {rule.confidence !== "—" &&
                                 ` in ${rule.confidence} of records containing the antecedent`}
-                              . This describes an association, not causation.
+                              ; lift is {rule.lift}.
                             </td>
                           </tr>
                         ))}
